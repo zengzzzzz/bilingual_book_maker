@@ -6,6 +6,7 @@ from os import environ as env
 
 import openai
 import requests
+import json
 from bs4 import BeautifulSoup as bs
 from ebooklib import epub
 from rich import print
@@ -114,11 +115,12 @@ class ChatGPT(Base):
 
 
 class BEPUB:
-    def __init__(self, epub_name, model, key):
+    def __init__(self, epub_name, model, key, batch_size):
         self.epub_name = epub_name
         self.new_epub = epub.EpubBook()
         self.translate_model = model(key)
         self.origin_book = epub.read_epub(self.epub_name)
+        self.batch_size = batch_size
 
     def make_bilingual_book(self):
         new_book = epub.EpubBook()
@@ -131,23 +133,59 @@ class BEPUB:
             [len(bs(i.content, "html.parser").findAll("p")) for i in all_items]
         )
         print("TODO need process bar here: " + str(all_p_length))
+
+        # Create batches of 10 items
+        item_batches = [all_items[i:i+self.batch_size] for i in range(0, len(all_items),self.batch_size)]
+        # Translate each batch and process each item
         index = 0
-        for i in self.origin_book.get_items():
-            if i.get_type() == 9:
-                soup = bs(i.content, "html.parser")
-                p_list = soup.findAll("p")
-                is_test_done = IS_TEST and index > 20
-                for p in p_list:
-                    if not is_test_done:
+        for batch_num, item_batch in enumerate(item_batches):
+            print(f"Processing batch {batch_num+1} of {len(item_batches)}")
+            start_time = time.time()
+            
+            is_test_done = IS_TEST and index > 20
+            if not is_test_done:
+                translate_p = []
+                for item in item_batch:
+                    if item.get_type() == 9:
+                        soup = bs(item.content, "html.parser")
+                        p_list = soup.findAll("p")
+                        for p in p_list:
+                            if p.text and not p.text.isdigit():
+                                translate_p.append(p)
+                # Translate
+                # translate_text = json.loads(self.translate_model.translate([p.text for p in translate_p]))
+                translate_text = [p.text for p in translate_p]
+                index += 1
+                # Process each item in the batch
+            for item in item_batch:
+                if item.get_type() == 9:
+                    soup = bs(item.content, "html.parser")
+                    p_list = soup.findAll("p")
+                    for p in p_list:
                         if p.text and not p.text.isdigit():
                             new_p = copy(p)
-                            # TODO banch of p to translate then combine
-                            # PR welcome here
-                            new_p.string = self.translate_model.translate(p.text)
+                            new_p.string = translate_text.pop(0)
                             p.insert_after(new_p)
-                            index += 1
-                i.content = soup.prettify().encode()
-            new_book.add_item(i)
+                item.content = soup.prettify().encode()
+                new_book.add_item(item)
+            print(f"Processed batch {batch_num+1} in {time.time()-start_time:.2f} seconds")     
+        # index = 0
+        # for i in self.origin_book.get_items():
+        #     if i.get_type() == 9:
+        #         soup = bs(i.content, "html.parser")
+        #         p_list = soup.findAll("p")
+        #         is_test_done = IS_TEST and index > 20
+        #         for p in p_list:
+        #             if not is_test_done:
+        #                 if p.text and not p.text.isdigit():
+        #                     new_p = copy(p)
+        #                     # TODO banch of p to translate then combine
+        #                     # PR welcome here
+        #                     new_p.string = self.translate_model.translate(p.text)
+        #                     p.insert_after(new_p)
+        #                     index += 1
+        #         i.content = soup.prettify().encode()
+        #     new_book.add_item(i)
         name = self.epub_name.split(".")[0]
         epub.write_epub(f"{name}_bilingual.epub", new_book, {})
 
@@ -189,14 +227,22 @@ if __name__ == "__main__":
         choices=["chatgpt", "gpt3"],  # support DeepL later
         help="Use which model",
     )
+    parser.add_argument(
+        "--batch_size",
+        dest="batch_size",
+        type=int,
+        default=5,
+        choices=[1,2,3,4,5],
+        help="the batch size for translation , max is 5",
+    )
     options = parser.parse_args()
     NO_LIMIT = options.no_limit
     IS_TEST = options.test
     OPENAI_API_KEY = options.openai_key or env.get("OPENAI_API_KEY")
-    if not OPENAI_API_KEY:
-        raise Exception("Need openai API key, please google how to")
-    if not options.book_name.endswith(".epub"):
-        raise Exception("please use epub file")
+    # if not OPENAI_API_KEY:
+    #     raise Exception("Need openai API key, please google how to")
+    # if not options.book_name.endswith(".epub"):
+    #     raise Exception("please use epub file")
     model = MODEL_DICT.get(options.model, "chatgpt")
-    e = BEPUB(options.book_name, model, OPENAI_API_KEY)
+    e = BEPUB("test_books/lemo.epub", model, OPENAI_API_KEY, options.batch_size)
     e.make_bilingual_book()
